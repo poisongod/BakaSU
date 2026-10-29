@@ -5,7 +5,9 @@
 
 #ifdef __aarch64__
 
+#include "compat/unexported_data.h"
 #include "../patch_memory.h"
+#include "infra/symbol_resolver.h"
 #include "klog.h" // IWYU pragma: keep
 #include "linux/cpumask.h"
 #include "linux/gfp.h" // IWYU pragma: keep
@@ -152,7 +154,22 @@ fail:
     })
 #define ksu_flush_icache(start, end) caches_clean_inval_pou(start, end)
 #else
-#define ksu_flush_dcache(start, sz) __flush_dcache_area((void *)start, sz)
+// KP-5.4 fork: __flush_dcache_area (arch/arm64/mm/cache.S:181) has no
+// EXPORT_SYMBOL on this tree either; resolve it from kallsyms on first use.
+// __flush_icache_range IS exported (arch/arm64/mm/flush.c:79) and stays a
+// direct call.
+typedef void (*ksu_flush_dcache_area_fn_t)(void *addr, size_t len);
+static ksu_flush_dcache_area_fn_t ksu_flush_dcache_area_fn;
+static void ksu_flush_dcache_dynamic(void *addr, size_t len)
+{
+    if (!ksu_flush_dcache_area_fn)
+        ksu_flush_dcache_area_fn = (void *)find_kernel_symbol_exact("__flush_dcache_area");
+    if (ksu_flush_dcache_area_fn)
+        ksu_flush_dcache_area_fn(addr, len);
+    else
+        pr_err("ksu: __flush_dcache_area unresolved, dcache flush skipped\n");
+}
+#define ksu_flush_dcache(start, sz) ksu_flush_dcache_dynamic((void *)(start), (sz))
 #define ksu_flush_icache(start, end) __flush_icache_range(start, end)
 #endif
 
@@ -270,6 +287,14 @@ static int ksu_patch_text_nosync_vmap(struct patch_text_info *info)
 // not a big problem because we are in stop_machine.
 // ^1: https://github.com/NothingOSS/android_kernel_device_modules_6.1_nothing_mt6878/blob/957dac185efe46cbf6336b0fff9516d84c8cd78f/drivers/misc/mediatek/mkp/mkp_main.c#L29
 // ^2: https://github.com/torvalds/linux/commit/c0eb315ad9719e41ce44708455cc69df7ac9f3f8
+// KP-5.4 fork: __set_fixmap is an extern function (arch/arm64/mm/mmu.c:1264)
+// and is NOT exported on this tree, so the set_fixmap_offset() macro would
+// leave an unresolvable UNDEF.  Resolve it from kallsyms at first use and
+// reproduce the macro's semantics: __set_fixmap() then
+// fix_to_virt(idx) + (phys & (PAGE_SIZE-1)).
+typedef void (*ksu_set_fixmap_fn_t)(enum fixed_addresses idx, phys_addr_t phys, pgprot_t prot);
+static ksu_set_fixmap_fn_t ksu_set_fixmap_fn;
+
 static int ksu_patch_text_nosync(void *dst, void *src, size_t len, int flags)
 {
     pr_info("patch dst=0x%lx src=0x%lx len=%ld\n", (unsigned long)dst, (unsigned long)src, len);
@@ -286,7 +311,15 @@ static int ksu_patch_text_nosync(void *dst, void *src, size_t len, int flags)
     }
     pr_info("phy addr for patch 0x%lx: 0x%lx\n", p, phy);
 
-    void *map = set_fixmap_offset(FIX_TEXT_POKE0, phy);
+    if (!ksu_set_fixmap_fn)
+        ksu_set_fixmap_fn = (void *)find_kernel_symbol_exact("__set_fixmap");
+    if (!ksu_set_fixmap_fn) {
+        pr_err("__set_fixmap unresolved, cannot poke 0x%lx\n", p);
+        ret = -ENOENT;
+        goto err;
+    }
+    ksu_set_fixmap_fn(FIX_TEXT_POKE0, phy, FIXMAP_PAGE_NORMAL);
+    void *map = (void *)(fix_to_virt(FIX_TEXT_POKE0) + (phy & (PAGE_SIZE - 1)));
     pr_info("fixmap addr for patch 0x%lx: 0x%lx\n", p, (unsigned long)map);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
@@ -302,7 +335,7 @@ static int ksu_patch_text_nosync(void *dst, void *src, size_t len, int flags)
     }
 #endif
 
-    clear_fixmap(FIX_TEXT_POKE0);
+    ksu_set_fixmap_fn(FIX_TEXT_POKE0, 0, FIXMAP_PAGE_CLEAR);
 
     if (flags & KSU_PATCH_TEXT_FLUSH_ICACHE)
         ksu_flush_icache((uintptr_t)dst, (uintptr_t)dst + len);

@@ -1,3 +1,4 @@
+#include "compat/unexported_data.h"
 #include <linux/uaccess.h>
 #include <linux/types.h>
 #include <linux/version.h>
@@ -40,10 +41,10 @@ static void reset_avc_cache()
     selnl_notify_policyload(0);
     selinux_status_update_policyload(0);
 #else
-    struct selinux_avc *avc = selinux_state.avc;
+    struct selinux_avc *avc = ksu_g_selinux_state->avc;
     avc_ss_reset(avc, 0);
     selnl_notify_policyload(0);
-    selinux_status_update_policyload(&selinux_state, 0);
+    selinux_status_update_policyload(ksu_g_selinux_state, 0);
 #endif
     selinux_xfrm_notify_policyload();
 }
@@ -58,7 +59,7 @@ static struct policydb *get_policydb(void)
 #ifdef SELINUX_POLICY_INSTEAD_SELINUX_SS
 #error It should not happen!
 #else
-    struct selinux_ss *ss = selinux_state.ss;
+    struct selinux_ss *ss = ksu_g_selinux_state->ss;
     db = &ss->policydb;
 #endif
 #else
@@ -119,7 +120,7 @@ static inline void ksu_lock_sepolicy_legacy(void)
 {
 // 4.14 - 5.10
 #if defined(KSU_COMPAT_USE_SELINUX_STATE) && !defined(SELINUX_POLICY_INSTEAD_SELINUX_SS)
-    write_lock_irq(&selinux_state.ss->policy_rwlock);
+    write_lock_irq(&ksu_g_selinux_state->ss->policy_rwlock);
 // 4.14-
 #else
     write_lock_irq(ksu_policy_rwlock_ptr);
@@ -130,7 +131,7 @@ static inline void ksu_unlock_sepolicy_legacy(void)
 {
 // 4.14 - 5.10
 #if defined(KSU_COMPAT_USE_SELINUX_STATE) && !defined(SELINUX_POLICY_INSTEAD_SELINUX_SS)
-    write_unlock_irq(&selinux_state.ss->policy_rwlock);
+    write_unlock_irq(&ksu_g_selinux_state->ss->policy_rwlock);
 // 4.14-
 #else
     write_unlock_irq(ksu_policy_rwlock_ptr);
@@ -149,8 +150,8 @@ void apply_kernelsu_rules()
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_POLICY_MUTEX)
     struct selinux_policy *pol, *old_pol;
-    mutex_lock(&selinux_state.policy_mutex);
-    old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));
+    mutex_lock(&ksu_g_selinux_state->policy_mutex);
+    old_pol = rcu_dereference_protected(ksu_g_selinux_state->policy, lockdep_is_held(&ksu_g_selinux_state->policy_mutex));
     backup_sepolicy = ksu_dup_sepolicy(old_pol);
     if (IS_ERR(backup_sepolicy)) {
         pr_err("failed to create backup sepolicy: %ld\n", PTR_ERR(backup_sepolicy));
@@ -310,13 +311,13 @@ void apply_kernelsu_rules()
     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_POLICY_MUTEX)
-    rcu_assign_pointer(selinux_state.policy, pol);
+    rcu_assign_pointer(ksu_g_selinux_state->policy, pol);
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);
 
     reset_avc_cache();
 out_unlock:
-    mutex_unlock(&selinux_state.policy_mutex);
+    mutex_unlock(&ksu_g_selinux_state->policy_mutex);
 #else
     /* Save the old policydb to free later. */
     memcpy(oldpolicydb, policydb_ptr, sizeof(*policydb_ptr));
@@ -640,8 +641,8 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
     //
     // I think we can directly use this rcu to safety update selinux_policy
     // this is also the upstream ksu way
-    mutex_lock(&selinux_state.policy_mutex);
-    old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));
+    mutex_lock(&ksu_g_selinux_state->policy_mutex);
+    old_pol = rcu_dereference_protected(ksu_g_selinux_state->policy, lockdep_is_held(&ksu_g_selinux_state->policy_mutex));
     pol = ksu_dup_sepolicy(old_pol);
     if (IS_ERR(pol)) {
         ret = PTR_ERR(pol);
@@ -715,7 +716,7 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_POLICY_MUTEX)
     // 5.10+
-    rcu_assign_pointer(selinux_state.policy, pol);
+    rcu_assign_pointer(ksu_g_selinux_state->policy, pol);
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);
 
@@ -726,7 +727,7 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
 out_drop_new_policy:
     ksu_destroy_sepolicy(pol);
 out_unlock:
-    mutex_unlock(&selinux_state.policy_mutex);
+    mutex_unlock(&ksu_g_selinux_state->policy_mutex);
 #else
     ret = success_cmd_count;
     /* Save the old policydb to free later. */

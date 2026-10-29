@@ -15,6 +15,7 @@
 
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
+#include "infra/symbol_resolver.h"
 #include "hook/syscall_hook_manager.h"
 #include "hook/tp_marker.h"
 #include "feature/sucompat.h"
@@ -24,6 +25,13 @@
 #if defined(__riscv)
 #include "hook/riscv64/syscall_regs.h"
 #endif
+
+extern int ksu_dbg_tp_rc;
+extern int ksu_dbg_tp_sym;
+extern int ksu_dbg_krp1;
+extern int ksu_dbg_krp2;
+extern int ksu_dbg_tp_hits;
+extern int ksu_dbg_tp_redir;
 
 #ifdef CONFIG_KRETPROBES
 
@@ -98,6 +106,8 @@ static struct kretprobe *syscall_unregfunc_rp = NULL;
 // sys_enter handler: redirect hooked syscalls to the dispatcher
 static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 {
+    if (ksu_dbg_tp_hits++ == 0)
+        pr_info("KSUDBG sys_enter handler first hit, id=%ld\n", id);
 #if defined(__x86_64__)
     if (unlikely(in_compat_syscall()))
 #elif defined(__aarch64__) || defined(__riscv)
@@ -111,6 +121,7 @@ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
     if (ksu_has_syscall_hook(id)) {
         struct pt_regs *current_regs = task_pt_regs(current);
 
+        ksu_dbg_tp_redir++;
 #if defined(__x86_64__)
         // Stash the original syscall number in ax.
         // We use ax because it currently just holds -ENOSYS and is safe to overwrite.
@@ -127,6 +138,36 @@ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 }
 #endif
 
+#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+// KP-5.4 fork: __tracepoint_sys_enter is instantiated unconditionally by
+// arch/arm64/kernel/ptrace.c (CREATE_TRACE_POINTS) but is NOT exported on
+// this tree, so the generated register_trace_prio_sys_enter() inline would
+// leave an UNDEF.  Resolve the tracepoint struct from kallsyms
+// (KALLSYMS_ALL=y) and call the exported probe_register_prio core directly;
+// its regfunc (syscall_regfunc -> TIF_SYSCALL_TRACEPOINT on every task)
+// still runs, which is exactly what makes trace_sys_enter fire.
+static struct tracepoint *ksu_sys_enter_tp;
+
+static int ksu_register_sys_enter_tracepoint(void)
+{
+    ksu_sys_enter_tp = (struct tracepoint *)find_kernel_symbol_exact("__tracepoint_sys_enter");
+    ksu_dbg_tp_sym = ksu_sys_enter_tp ? 1 : 0;
+    if (!ksu_sys_enter_tp) {
+        pr_err("hook_manager: __tracepoint_sys_enter not found in kallsyms\n");
+        return -ENOENT;
+    }
+    return tracepoint_probe_register_prio(ksu_sys_enter_tp, (void *)ksu_sys_enter_handler, NULL, INT_MIN);
+}
+
+static void ksu_unregister_sys_enter_tracepoint(void)
+{
+    if (!ksu_sys_enter_tp)
+        return;
+    tracepoint_probe_unregister(ksu_sys_enter_tp, (void *)ksu_sys_enter_handler, NULL);
+    ksu_sys_enter_tp = NULL;
+}
+#endif
+
 void __init ksu_syscall_hook_manager_init(void)
 {
     int ret;
@@ -135,6 +176,8 @@ void __init ksu_syscall_hook_manager_init(void)
 #ifdef CONFIG_KRETPROBES
     syscall_regfunc_rp = init_kretprobe("syscall_regfunc", syscall_regfunc_handler);
     syscall_unregfunc_rp = init_kretprobe("syscall_unregfunc", syscall_unregfunc_handler);
+    ksu_dbg_krp1 = syscall_regfunc_rp ? 0 : -1;
+    ksu_dbg_krp2 = syscall_unregfunc_rp ? 0 : -1;
 #endif
 
     // Register syscall hooks via dispatcher
@@ -143,9 +186,11 @@ void __init ksu_syscall_hook_manager_init(void)
     ksu_register_syscall_hook(__NR_execveat, ksu_hook_execveat);
     ksu_register_syscall_hook(__NR_newfstatat, ksu_hook_newfstatat);
     ksu_register_syscall_hook(__NR_faccessat, ksu_hook_faccessat);
+    ksu_register_syscall_hook(__NR_prctl, ksu_hook_prctl);
 
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
-    ret = register_trace_prio_sys_enter(ksu_sys_enter_handler, NULL, INT_MIN);
+    ret = ksu_register_sys_enter_tracepoint();
+    ksu_dbg_tp_rc = ret;
 #ifndef CONFIG_KRETPROBES
     ksu_mark_running_process_locked();
 #endif
@@ -164,7 +209,7 @@ void __exit ksu_syscall_hook_manager_exit(void)
 {
     pr_info("hook_manager: ksu_hook_manager_exit called\n");
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
-    unregister_trace_sys_enter(ksu_sys_enter_handler, NULL);
+    ksu_unregister_sys_enter_tracepoint();
     tracepoint_synchronize_unregister();
     pr_info("hook_manager: sys_enter tracepoint unregistered\n");
 #endif
@@ -179,6 +224,7 @@ void __exit ksu_syscall_hook_manager_exit(void)
     ksu_unregister_syscall_hook(__NR_execveat);
     ksu_unregister_syscall_hook(__NR_newfstatat);
     ksu_unregister_syscall_hook(__NR_faccessat);
+    ksu_unregister_syscall_hook(__NR_prctl);
 
     ksu_syscall_hook_exit();
 

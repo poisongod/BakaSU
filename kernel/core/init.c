@@ -157,6 +157,42 @@ bool allow_shell = false;
 bool ksu_no_custom_rc = false;
 module_param_named(norc, ksu_no_custom_rc, bool, 0);
 
+/* KP-5.4 fork diagnostics: init/hook registration state as sysfs params.
+ * init-time pr_info does not surface in dmesg on this device, so registration
+ * results and runtime hit counters are recorded here instead (0444 readable). */
+int ksu_dbg_stage;
+module_param(ksu_dbg_stage, int, 0444);
+int ksu_dbg_kp_rc = -1000;
+module_param(ksu_dbg_kp_rc, int, 0444);
+int ksu_dbg_kp_hits;
+module_param(ksu_dbg_kp_hits, int, 0444);
+int ksu_dbg_tp_rc = -1000;
+module_param(ksu_dbg_tp_rc, int, 0444);
+int ksu_dbg_tp_sym = -1000;
+module_param(ksu_dbg_tp_sym, int, 0444);
+int ksu_dbg_krp1 = -1000;
+module_param(ksu_dbg_krp1, int, 0444);
+int ksu_dbg_krp2 = -1000;
+module_param(ksu_dbg_krp2, int, 0444);
+int ksu_dbg_sysent = -1000;
+module_param(ksu_dbg_sysent, int, 0444);
+int ksu_dbg_disp = -1000;
+module_param(ksu_dbg_disp, int, 0444);
+int ksu_dbg_patch = -1000;
+module_param(ksu_dbg_patch, int, 0444);
+int ksu_dbg_tp_hits;
+module_param(ksu_dbg_tp_hits, int, 0444);
+int ksu_dbg_tp_redir;
+module_param(ksu_dbg_tp_redir, int, 0444);
+int ksu_dbg_disp_hits;
+module_param(ksu_dbg_disp_hits, int, 0444);
+int ksu_dbg_setuid_hits;
+module_param(ksu_dbg_setuid_hits, int, 0444);
+int ksu_dbg_nozygote;
+module_param(ksu_dbg_nozygote, int, 0444);
+int ksu_dbg_noallow;
+module_param(ksu_dbg_noallow, int, 0444);
+
 #ifdef MODULE
 bool ksu_bundled = false;
 module_param_named(bundled, ksu_bundled, bool, 0);
@@ -168,6 +204,11 @@ MODULE_PARM_DESC(block_modules, "Comma-separated preset module names to acknowle
 
 int __init kernelsu_init(void)
 {
+    ksu_dbg_stage = 1;
+    /* level probe: if even KERN_EMERG is swallowed, the mystery is
+     * context/address based, not level based. */
+    pr_emerg("KSUDBG init enter\n");
+
     // clang-format off
     
     // ddk in x86-64 doesn't have generated/compile.h
@@ -185,11 +226,13 @@ int __init kernelsu_init(void)
 #endif
     // clang-format on
 
-#ifdef MODULE
-    ksu_late_loaded = (current->pid != 1);
-#else
+    // KP-5.4 fork: insmod always runs post-boot from the exploit bootstrap
+    // (current->pid != 1), but we deliberately take the boot-time init path:
+    // ksud-driven rule application (ksud_integration supercall handlers),
+    // ksu_ksud_init (direct read/fstat table hooks + input kprobe),
+    // module_load_filter.  Late-load semantics would also flip the manager's
+    // LATE_LOAD flag and the app would label the driver "jailbreak" again.
     ksu_late_loaded = false;
-#endif
 
     // If we are in tracepoint hook, and won't enable PATCH_SYSCALL_DISPATCHER, check x86-64 hooks
 #if defined(__x86_64__) && !defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
@@ -222,10 +265,6 @@ int __init kernelsu_init(void)
         pr_alert("shell is allowed at init!");
     }
 
-#ifdef CONFIG_ARM64
-    ksu_start_apatch_conflict_check();
-#endif
-
     ksu_cred = prepare_creds();
     if (!ksu_cred) {
         pr_err("prepare cred failed!\n");
@@ -233,6 +272,16 @@ int __init kernelsu_init(void)
     }
 
     ksu_init_symbol_resolver();
+    if (ksu_resolve_unexported()) {
+        pr_err("failed to resolve unexported kernel symbols\n");
+        return -ENOENT;
+    }
+    ksu_dbg_stage = 3;
+#ifdef CONFIG_ARM64
+    /* must run after ksu_resolve_unexported(): its kthread may call the
+     * do_syslog shim, whose slot would still be NULL otherwise. */
+    ksu_start_apatch_conflict_check();
+#endif
     ksu_selinux_init();
     ksu_feature_init();
     ksu_sulog_init();
@@ -240,10 +289,27 @@ int __init kernelsu_init(void)
     ksu_selinux_hide_init();
 
     ksu_supercalls_init();
+    ksu_dbg_stage = 4;
     ksu_app_profile_init();
 
     ksu_setuid_hook_init();
     ksu_sucompat_init();
+
+    /* Standard KSU init sepolicy injection on the common path.
+     * This fork deliberately forces ksu_late_loaded=false (rationale in the
+     * comment at the assignment: ksud-driven supercall rule application,
+     * else-branch hooks ksu_ksud_init/module_load_filter, and keeping the
+     * manager's LATE_LOAD flag off so the app doesn't label the driver
+     * "jailbreak"), which would skip apply_kernelsu_rules()/cache_sid()
+     * entirely -- neither ksud_integration nor any other call site invokes
+     * apply_kernelsu_rules().  Run them here so the ruleset is fully applied
+     * when the module loads; ksud's later `sepolicy apply` (handle_policy)
+     * uses its own local policydb copy and stays compatible.  setup_ksu_cred()
+     * and escape_to_root_for_init() remain late-load-only: the ksud
+     * supercall handlers trigger them at runtime. */
+    apply_kernelsu_rules();
+    cache_sid();
+
     if (ksu_late_loaded) {
         // This way are only happen when tracepoint+lkm
         // so we use ifdef MODULE there to avoid manual hook compile failed
@@ -278,6 +344,7 @@ int __init kernelsu_init(void)
 #endif
     } else {
         ksu_hook_init();
+        ksu_dbg_stage = 6;
 
         ksu_module_load_filter_hook_init();
 
@@ -295,6 +362,8 @@ int __init kernelsu_init(void)
     kobject_del(&THIS_MODULE->mkobj.kobj);
 #endif
 #endif
+    ksu_dbg_stage = 100;
+    pr_emerg("KSUDBG init done\n");
     return 0;
 }
 

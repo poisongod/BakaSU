@@ -19,7 +19,12 @@
 #include "uapi/supercall.h"
 #include "supercall/internal.h"
 #include "arch.h"
+#include "runtime/ksud.h"
+#include "manager/manager_identity.h"
 #include "klog.h" // IWYU pragma: keep
+
+extern int ksu_dbg_kp_rc;
+extern int ksu_dbg_kp_hits;
 
 #define KSU_DRIVER_PERMISSION_SU_SESSION (1UL << 0)
 
@@ -89,6 +94,79 @@ static int ksu_install_fd_with_permissions(unsigned int fd_flags, unsigned long 
 int ksu_install_fd(void)
 {
     return ksu_install_fd_with_permissions(O_CLOEXEC, 0);
+}
+
+// Non-CLOEXEC variant: used to hand the fd across an exec boundary.
+int ksu_install_fd_no_cloexec(void)
+{
+    return ksu_install_fd_with_permissions(0, 0);
+}
+
+// True when the calling task's fdtable already holds a driver fd.  Keeps the
+// manager's repeated legacy prctl fallbacks (see ksu_hook_prctl) from
+// stacking duplicate fds.
+bool ksu_current_has_driver_fd(void)
+{
+	struct files_struct *files = current->files;
+	struct fdtable *fdt;
+	unsigned int i;
+	bool found = false;
+
+	if (!files)
+		return false;
+
+	spin_lock(&files->file_lock);
+	fdt = files_fdtable(files);
+	for (i = 0; i < fdt->max_fds; i++) {
+		struct file *f = fdt->fd[i];
+		if (f && f->f_op == &anon_ksu_fops) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&files->file_lock);
+
+	return found;
+}
+
+// Hand the driver fd to the about-to-exec ksud image (exec'd by the manager,
+// e.g. KsuCli / daemon spawn).  With the <5.10 keep-filter policy the
+// manager keeps its zygote seccomp filter, so ksud's reboot(magic) install
+// fallback gets SIGSYS, and the fd ksu_handle_setuid installed into the
+// manager is O_CLOEXEC so it never survives the child's exec.  Cover it
+// here: at sys_enter the current task IS the forked child that is about to
+// become ksud; a non-CLOEXEC fd installed now lands in its fdtable and
+// stays after exec.  Every exec runs against a fresh forked fdtable, so
+// repeated spawns never accumulate fds in the manager itself.
+void ksu_hand_fd_for_ksud_exec(const char __user *filename_user)
+{
+    char path[256];
+    long ret;
+    int fd;
+    const char *base;
+
+    if (!ksu_is_manager_uid(ksu_get_uid_t(current_uid())))
+        return;
+
+    ret = strncpy_from_user(path, untagged_addr((unsigned long)filename_user), sizeof(path));
+    if (ret < 0 || ret >= (long)sizeof(path))
+        return;
+    path[ret] = '\0';
+
+    if (strcmp(path, KSUD_PATH) != 0) {
+        // The manager's root shell (KsuCli.createRootShell) execs its
+        // bundled libksud.so at <nativeLibraryDir>/libksud.so — the path
+        // carries installer random segments, so match by basename.  The
+        // manager-uid check above keeps this tight: only the manager's own
+        // execs of libksud.so / ksud ever hit this.
+        base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (strcmp(base, "libksud.so") != 0)
+            return;
+    }
+
+    fd = ksu_install_fd_no_cloexec();
+    pr_info("hand driver fd %d to exec'ing ksud (pid %d)\n", fd, current->pid);
 }
 
 int ksu_install_su_fd(void)
@@ -169,6 +247,9 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
     int cmd = (int)PT_REGS_PARM3(real_regs);
     void __user **arg = (void __user **)&PT_REGS_SYSCALL_PARM4(real_regs);
 
+    ksu_dbg_kp_hits++;
+    pr_info("KSUDBG reboot_pre real=%px m1=0x%x m2=0x%x\n", real_regs,
+            (unsigned)magic1, (unsigned)magic2);
     ksu_handle_sys_reboot(magic1, magic2, cmd, arg);
     return 0;
 }
@@ -187,6 +268,7 @@ void __init ksu_supercalls_init(void)
 
 #ifdef CONFIG_KSU_TRACEPOINT_HOOK
     rc = register_kprobe(&reboot_kp);
+    ksu_dbg_kp_rc = rc;
     if (rc) {
         pr_err("reboot kprobe failed: %d\n", rc);
     } else {

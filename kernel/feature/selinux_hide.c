@@ -1,3 +1,4 @@
+#include "compat/unexported_data.h"
 #include <linux/cred.h>
 #include <linux/cpu.h>
 #include <linux/memory.h>
@@ -169,7 +170,7 @@ static ssize_t my_write_context(struct file *file, char *buf, size_t size)
         goto out;
     }
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
-    length = avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY,
+    length = avc_has_perm(ksu_g_selinux_state, current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY,
                           SECURITY__CHECK_CONTEXT, NULL);
     if (length)
         goto out;
@@ -179,7 +180,7 @@ static ssize_t my_write_context(struct file *file, char *buf, size_t size)
         goto out;
     } else {
         // sync to global sidtab
-        security_context_to_sid(&selinux_state, buf, size, &tmp, GFP_KERNEL);
+        security_context_to_sid(ksu_g_selinux_state, buf, size, &tmp, GFP_KERNEL);
     }
 
     length = security_sid_to_context(&fake_state, sid, &canon, &len);
@@ -234,7 +235,7 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
     length = avc_has_perm(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
     length =
-        avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
+        avc_has_perm(ksu_g_selinux_state, current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
 #else
     length = avc_has_perm(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
 #endif
@@ -282,7 +283,7 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
         goto out;
     } else {
         // sync to global sidtab
-        security_context_to_sid(&selinux_state, scon, sconlen, &tmp, GFP_KERNEL);
+        security_context_to_sid(ksu_g_selinux_state, scon, sconlen, &tmp, GFP_KERNEL);
     }
 
     length = security_context_to_sid(&fake_state, tcon, tconlen, &tsid, GFP_KERNEL);
@@ -290,7 +291,7 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
         goto out;
     } else {
         // sync to global sidtab
-        security_context_to_sid(&selinux_state, tcon, tconlen, &tmp, GFP_KERNEL);
+        security_context_to_sid(ksu_g_selinux_state, tcon, tconlen, &tmp, GFP_KERNEL);
     }
 
     security_compute_av_user(&fake_state, ssid, tsid, tclass, &avd);
@@ -338,7 +339,7 @@ extern setprocattr_fn ksu_orig_setprocattr;
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0) || defined(KSU_COMPAT_SETPROCATTR_USE_NEW_PROTOTYPE)
-int __nocfi ksu_handle_selinux_setprocattr(const char *name, void *value, size_t size)
+int ksu_handle_selinux_setprocattr(const char *name, void *value, size_t size)
 #else
 int __nocfi ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, void *value, size_t size)
 #endif
@@ -358,7 +359,7 @@ int __nocfi ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, vo
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
     error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
-    error = avc_has_perm(&selinux_state, mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);
+    error = avc_has_perm(ksu_g_selinux_state, mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);
 #else
     error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);
 #endif
@@ -385,7 +386,7 @@ int __nocfi ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, vo
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
             security_context_to_sid(str, size, &tmp, GFP_KERNEL);
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
-            security_context_to_sid(&selinux_state, str, size, &tmp, GFP_KERNEL);
+            security_context_to_sid(ksu_g_selinux_state, str, size, &tmp, GFP_KERNEL);
 #else
             ksu_security_context_to_sid(str, size, &tmp, GFP_KERNEL);
 #endif
@@ -640,7 +641,7 @@ static int ksu_selinux_hide_enable()
 #define ksu_for_each_lsm_entry list_for_each_entry
 #endif
 
-    ksu_for_each_lsm_entry(hp, &security_hook_heads.setprocattr, list)
+    ksu_for_each_lsm_entry(hp, &ksu_g_security_hook_heads->setprocattr, list)
     {
         // https://github.com/torvalds/linux/commit/d69dece5f5b6bc7a5e39d2b6136ddc69469331fe
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0) || defined(KSU_COMPAT_REQUIRE_PROVIDE_LSM_NAME)
@@ -837,9 +838,9 @@ __maybe_static void initialize_fake_status()
 {
     // https://github.com/torvalds/linux/commit/4b36cb773a8153417a080f8025d522322f915aea
 #if LINUX_VERSION_CODE > KERNEL_VERSION(5, 7, 0) || defined(KSU_COMPAT_SELINUX_STATUS_VAR_IN_SELINUX_STATE)
-    ksu_selinux_status_lock = &selinux_state.status_lock;
+    ksu_selinux_status_lock = &ksu_g_selinux_state->status_lock;
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
-    ksu_selinux_status_lock = &selinux_state.ss->status_lock;
+    ksu_selinux_status_lock = &ksu_g_selinux_state->ss->status_lock;
 #elif defined(CONFIG_KALLSYMS_ALL)
     // call ksu_resolve_symbol_for_functable_hook to search selinux_status_lock
     // because some compiler add suffix for that
@@ -856,9 +857,9 @@ __maybe_static void initialize_fake_status()
         goto out;
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(5, 7, 0) || defined(KSU_COMPAT_SELINUX_STATUS_VAR_IN_SELINUX_STATE)
-    struct page *selinux_status_page = selinux_state.status_page;
+    struct page *selinux_status_page = ksu_g_selinux_state->status_page;
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
-    struct page *selinux_status_page = selinux_state.ss->status_page;
+    struct page *selinux_status_page = ksu_g_selinux_state->ss->status_page;
 #elif defined(CONFIG_KALLSYMS_ALL)
     // call ksu_resolve_symbol_for_functable_hook to search selinux_status_page
     // because some compiler add suffix for that

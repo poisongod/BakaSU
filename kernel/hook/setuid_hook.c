@@ -32,6 +32,10 @@
 #include <linux/workqueue.h>
 #endif
 
+extern int ksu_dbg_setuid_hits;
+extern int ksu_dbg_nozygote;
+extern int ksu_dbg_noallow;
+
 static inline void ksu_set_file_immutable(const char *path_name, bool immutable)
 {
     struct path path;
@@ -111,7 +115,17 @@ static int handle_zygote_next_setresuid(uid_t new_uid)
             spin_unlock_irq(&current->sighand->siglock);
         }
 #else
-        disable_seccomp();
+        // <5.10: keep the zygote seccomp filter (mode=2) instead of
+        // disable_seccomp().  The original rationale was that libksud's
+        // reboot(magic) needs to pass the filter, but fd install does not
+        // depend on it: ksu_install_fd() below (and in ksu_handle_setuid)
+        // hands the manager its driver fd directly, and reboot_pre kprobe
+        // hits all come from the native ksud process which never runs a
+        // zygote filter.  5.4 has no action_cache field so
+        // ksu_seccomp_allow_cache(__NR_reboot) is unavailable; root allowed
+        // apps must not lose their sandbox just for that.  su subshells
+        // still get their filter dropped in apply profile (app_profile.c).
+        pr_info("KSUDBG keep seccomp filter for allow uid=%d\n", new_uid);
 #endif
         return 0;
     }
@@ -133,6 +147,10 @@ do_susfs_work: {
 
 int ksu_handle_setuid(uid_t new_uid, uid_t old_uid)
 {
+    if (ksu_dbg_setuid_hits++ < 10)
+        pr_info("KSUDBG setuid entry #%d old=%u new=%u zygote=%d manager=%d\n",
+                ksu_dbg_setuid_hits, old_uid, new_uid, (int)is_zygote(current_cred()),
+                (int)ksu_is_manager_uid(new_uid));
 #ifdef CONFIG_KSU_SUSFS
     // Only susfs will process zygote_next
     // We don't care it in Tracepoint / Manual hook
@@ -143,6 +161,7 @@ int ksu_handle_setuid(uid_t new_uid, uid_t old_uid)
 #endif
     // We are only interested in processes spawned by zygote.
     if (!is_zygote(current_cred())) {
+        ksu_dbg_nozygote++;
         return 0;
     }
 
@@ -158,7 +177,11 @@ int ksu_handle_setuid(uid_t new_uid, uid_t old_uid)
             spin_unlock_irq(&current->sighand->siglock);
         }
 #else
-        disable_seccomp();
+        // <5.10: keep the zygote seccomp filter (mode=2); see the matching
+        // note in handle_setresuid above.  The manager gets its driver fd
+        // via ksu_install_fd() right below, independent of any reboot(2)
+        // call from the filtered app process.
+        pr_info("KSUDBG keep seccomp filter for allow uid=%d\n", new_uid);
 #endif
         ksu_clear_current_proc_unprivillege();
         if (ksu_is_manager_uid(new_uid)) {
@@ -170,6 +193,7 @@ int ksu_handle_setuid(uid_t new_uid, uid_t old_uid)
         return 0;
     }
 
+    ksu_dbg_noallow++;
     ksu_set_current_proc_unprivillege();
 
     // Handle kernel umount

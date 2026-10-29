@@ -13,6 +13,11 @@
 syscall_fn_t *ksu_syscall_table = NULL;
 int ksu_dispatcher_nr = -1;
 
+extern int ksu_dbg_sysent;
+extern int ksu_dbg_disp;
+extern int ksu_dbg_patch;
+extern int ksu_dbg_disp_hits;
+
 // Hook registration table — read with READ_ONCE from tracepoint/dispatcher
 // context, written with WRITE_ONCE from init/exit context.
 static ksu_syscall_hook_fn syscall_hooks[__NR_syscalls];
@@ -142,8 +147,10 @@ static int __init ksu_find_ni_syscall_slots(int *out_slots, int max_slots)
 // Unified dispatcher: reads original NR from x8, dispatches to handler.
 // Validates that syscallno matches our dispatcher slot (i.e. we redirected it),
 // otherwise it's a spurious call — return -ENOSYS.
-static long __nocfi ksu_syscall_dispatcher(const struct pt_regs *regs)
+static long ksu_syscall_dispatcher(const struct pt_regs *regs)
 {
+    if (ksu_dbg_disp_hits++ == 0)
+        pr_info("KSUDBG dispatcher first hit, syscallno=%d\n", (int)regs->syscallno);
     if (regs->syscallno != ksu_dispatcher_nr)
         return -ENOSYS;
 
@@ -204,6 +211,7 @@ void __init ksu_syscall_hook_init(void)
     memset(syscall_hooks, 0, sizeof(syscall_hooks));
 
     ksu_syscall_table = (syscall_fn_t *)ksu_resolve_symbol_for_functable_hook("sys_call_table");
+    ksu_dbg_sysent = ksu_syscall_table ? 1 : 0;
     pr_info("sys_call_table=0x%lx", (unsigned long)ksu_syscall_table);
 
     if (!ksu_syscall_table)
@@ -217,6 +225,9 @@ void __init ksu_syscall_hook_init(void)
 
     ksu_dispatcher_nr = ni_slot;
     ksu_syscall_table_hook(ksu_dispatcher_nr, (syscall_fn_t)ksu_syscall_dispatcher, NULL);
+    ksu_dbg_disp = ksu_dispatcher_nr;
+    ksu_dbg_patch =
+        (ksu_syscall_table[ksu_dispatcher_nr] == (syscall_fn_t)ksu_syscall_dispatcher) ? 1 : 0;
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
 }
 

@@ -1,3 +1,4 @@
+#include "compat/unexported_data.h"
 #include "linux/cred.h"
 #include "linux/sched.h"
 #include "linux/security.h"

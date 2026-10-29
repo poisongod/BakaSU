@@ -18,7 +18,12 @@
 // 3: scoped su-session driver fd
 // 4: add KSU_GET_INFO_FLAG_BUNDLED
 // 5: add EVENT_SERVICES with a start/skip result
-static const __u32 KERNEL_SU_UAPI_VERSION = 5;
+// 6: add KSU_IOCTL_LOOKUP_SYMBOLS and KSU_GET_INFO_FLAG_PREINIT; modules.rc
+//    and preinit may live under /metadata/vold/ksu  (synced from upstream
+//    d5e9e025 so the 35252/6 manager's isFullFeatured check passes; only the
+//    version constant is bumped -- LOOKUP_SYMBOLS is ksud-only and the old
+//    staged ksud never calls it, PREINIT flag is unreachable in late-load)
+static const __u32 KERNEL_SU_UAPI_VERSION = 6;
 
 /* Magic numbers for reboot hook to install fd */
 DEFINE_KSU_UAPI_CONST(__u32, KSU_INSTALL_MAGIC1, 0xDEADBEEF)

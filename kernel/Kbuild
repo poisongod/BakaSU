@@ -18,12 +18,14 @@ kernelsu-objs += manager/manager.o
 endif
 
 kernelsu-objs += compat/kernel_compat.o
+kernelsu-objs += compat/unexported_shim.o
 kernelsu-objs += infra/su_mount_ns.o
 kernelsu-objs += infra/seccomp_cache.o
 kernelsu-objs += infra/file_wrapper.o
 kernelsu-objs += infra/event_queue.o
 kernelsu-objs += runtime/boot_event.o
 kernelsu-objs += runtime/ksud_integration.o
+kernelsu-objs += runtime/hotload.o
 
 kernelsu-objs += selinux/selinux.o
 kernelsu-objs += selinux/sepolicy.o
@@ -46,6 +48,7 @@ ccflags-y += -Wno-declaration-after-statement -Wno-unused-function -Wno-unused-v
 ccflags-y += -Wno-int-to-pointer-cast -Wno-declaration-after-statement
 
 ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include
+ccflags-y += -I$(objtree)/security/selinux
 ccflags-y += -I$(srctree)/$(src) -I$(srctree)/$(src)/include
 ccflags-y += -I$(src) -I$(src)/include
 
@@ -173,10 +176,10 @@ ifdef CONFIG_KSU_TRACEPOINT_HOOK
     ifneq ($(KERNEL_TYPE), GKI 2.0)
       $(info -- $(REPO_NAME) TP Hooks are only supported on GKI 2.0 kernels.)
       $(info -- Current Kernel Type: $(KERNEL_TYPE))
-      $(info -- If you really want to continue, go to Kbuild and comment out this warning.)
-      $(info -- Usually, this error occurs because you forgot to enable some kernel configurations.)
-      $(info -- Read: https://bakasu.org/guide/manual-integrate.html)
-      $(error TP hooks are incompatible with Non-GKI/GKI 1.0 kernels.)
+      $(info -- KP-5.4 fork: gate intentionally disabled. sys_enter tracepoint is instantiated)
+      $(info -- unconditionally by arch/arm64/kernel/ptrace.c CREATE_TRACE_POINTS on this tree,)
+      $(info -- and register is done via kallsyms-resolved tp + exported probe_register_prio.)
+      #$(error TP hooks are incompatible with Non-GKI/GKI 1.0 kernels.)
     endif
   endif
 
@@ -246,3 +249,4 @@ $(info -- KernelSU Manager package name: $(KSU_MANAGER_PACKAGE))
 endif
 
 # Keep a new line here!! Because someone may append config
+
