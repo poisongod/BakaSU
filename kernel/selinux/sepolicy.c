@@ -1,3 +1,4 @@
+#include "compat/unexported_data.h"
 #include <linux/gfp.h>
 #include <linux/printk.h>
 #include <linux/slab.h>
@@ -1122,7 +1123,7 @@ static inline void ksu_lock_sepolicy_legacy(void)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && !defined(KSU_COMPAT_HAS_POLICY_MUTEX)
 // 4.14 - 5.10
 #if defined(KSU_COMPAT_USE_SELINUX_STATE)
-    read_lock(&selinux_state.ss->policy_rwlock);
+    read_lock(&ksu_g_selinux_state->ss->policy_rwlock);
 // 4.14-
 #else
     read_lock(ksu_policy_rwlock_ptr);
@@ -1135,7 +1136,7 @@ static inline void ksu_unlock_sepolicy_legacy(void)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && !defined(KSU_COMPAT_HAS_POLICY_MUTEX)
 // 4.14 - 5.10
 #if defined(KSU_COMPAT_USE_SELINUX_STATE)
-    read_unlock(&selinux_state.ss->policy_rwlock);
+    read_unlock(&ksu_g_selinux_state->ss->policy_rwlock);
 // 4.14-
 #else
     read_unlock(ksu_policy_rwlock_ptr);

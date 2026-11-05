@@ -12,6 +12,15 @@
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs.h>
 #endif
+/*
+ * LKM edition of SuSFS: CONFIG_KSU_SUSFS is *not* defined for this object
+ * (the -D is applied per file in Kbuild), so we cannot pull in
+ * <linux/susfs.h> here.  All we need is the initialiser, which must run at
+ * module load time so later phases can register their kprobes from it.
+ */
+#ifdef KSU_SUSFS_LKM
+extern void susfs_init(void);
+#endif
 #include <linux/sched.h>
 
 #include "policy/allowlist.h"
@@ -109,6 +118,14 @@ static inline void __init ksu_hook_init(void)
 #if defined(CONFIG_KSU_TRACEPOINT_HOOK)
     ksu_syscall_hook_init();
     ksu_syscall_hook_manager_init();
+#ifdef KSU_SUSFS_LKM
+    /*
+     * Upstream only calls susfs_init() in the inline-hook branch below.
+     * We run TRACEPOINT, so without this the SuSFS state would never be
+     * initialised and every later phase hook would never arm.
+     */
+    susfs_init();
+#endif
 #elif defined(CONFIG_KSU_MANUAL_HOOK)
 // only lsm hook need call init
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
@@ -122,6 +139,11 @@ static inline void __init ksu_hook_init(void)
 #else
 #error "Unsupported hook type"
 #endif
+
+    /* Intercept reboot(0xdeadbeef, ...) for the driver-fd install and the
+     * SuSFS command ABI.  Must come after ksu_syscall_hook_init(): it
+     * patches sys_call_table[__NR_reboot] and needs the resolved table. */
+    ksu_supercalls_init();
 }
 
 static inline void __exit ksu_hook_exit(void)
@@ -157,9 +179,68 @@ bool allow_shell = false;
 bool ksu_no_custom_rc = false;
 module_param_named(norc, ksu_no_custom_rc, bool, 0);
 
+/* KP-5.4 fork diagnostics: init/hook registration state as sysfs params.
+ * init-time pr_info does not surface in dmesg on this device, so registration
+ * results and runtime hit counters are recorded here instead (0444 readable). */
+int ksu_dbg_stage;
+module_param(ksu_dbg_stage, int, 0444);
+int ksu_dbg_kp_rc = -1000;
+module_param(ksu_dbg_kp_rc, int, 0444);
+int ksu_dbg_kp_hits;
+module_param(ksu_dbg_kp_hits, int, 0444);
+/* Backup path: kprobe on __arm64_sys_reboot that only serves the driver-fd
+ * handshake.  ksu_dbg_kp_reg = register_kprobe() result, ksu_dbg_kp_kps =
+ * number of times it actually installed an fd (i.e. the table hook was not
+ * serving the syscall). */
+int ksu_dbg_kp_reg = -1000;
+module_param(ksu_dbg_kp_reg, int, 0444);
+int ksu_dbg_kp_kps;
+module_param(ksu_dbg_kp_kps, int, 0444);
+/* Driver-fd hand-off at execve(): number of ksud images that were given a
+ * non-CLOEXEC fd before exec.  This path does not depend on the reboot
+ * syscall at all, so ksu_dbg_exec_fd > 0 proves the su chain got its fd
+ * even if both reboot hooks are broken. */
+int ksu_dbg_exec_fd;
+module_param(ksu_dbg_exec_fd, int, 0444);
+int ksu_dbg_tp_rc = -1000;
+module_param(ksu_dbg_tp_rc, int, 0444);
+int ksu_dbg_tp_sym = -1000;
+module_param(ksu_dbg_tp_sym, int, 0444);
+int ksu_dbg_krp1 = -1000;
+module_param(ksu_dbg_krp1, int, 0444);
+int ksu_dbg_krp2 = -1000;
+module_param(ksu_dbg_krp2, int, 0444);
+int ksu_dbg_sysent = -1000;
+module_param(ksu_dbg_sysent, int, 0444);
+int ksu_dbg_disp = -1000;
+module_param(ksu_dbg_disp, int, 0444);
+int ksu_dbg_patch = -1000;
+module_param(ksu_dbg_patch, int, 0444);
+int ksu_dbg_tp_hits;
+module_param(ksu_dbg_tp_hits, int, 0444);
+int ksu_dbg_tp_redir;
+module_param(ksu_dbg_tp_redir, int, 0444);
+int ksu_dbg_disp_hits;
+module_param(ksu_dbg_disp_hits, int, 0444);
+int ksu_dbg_setuid_hits;
+module_param(ksu_dbg_setuid_hits, int, 0444);
+int ksu_dbg_nozygote;
+module_param(ksu_dbg_nozygote, int, 0444);
+int ksu_dbg_noallow;
+module_param(ksu_dbg_noallow, int, 0444);
+
 #ifdef MODULE
 bool ksu_bundled = false;
 module_param_named(bundled, ksu_bundled, bool, 0);
+
+/* Late-load init used to hard-code setenforce(true) whenever SELinux was
+ * permissive.  Our recovery flow loads the module from a permissive context
+ * on purpose and flips enforcing itself once overlay/daemon/su are in place,
+ * so make the flip opt-in.  Default 0 = leave the current mode untouched;
+ * pass enforce_on_load=1 for upstream behaviour. */
+bool ksu_enforce_on_load = false;
+module_param_named(enforce_on_load, ksu_enforce_on_load, bool, 0644);
+MODULE_PARM_DESC(enforce_on_load, "Flip SELinux to enforcing after late-load init (default: 0, leave as-is)");
 #endif
 
 char ksu_block_modules[256];
@@ -168,6 +249,11 @@ MODULE_PARM_DESC(block_modules, "Comma-separated preset module names to acknowle
 
 int __init kernelsu_init(void)
 {
+    ksu_dbg_stage = 1;
+    /* level probe: if even KERN_EMERG is swallowed, the mystery is
+     * context/address based, not level based. */
+    pr_emerg("KSUDBG init enter\n");
+
     // clang-format off
     
     // ddk in x86-64 doesn't have generated/compile.h
@@ -185,6 +271,18 @@ int __init kernelsu_init(void)
 #endif
     // clang-format on
 
+    /* Report the real load timing.  This module is always insmod'ed after
+     * init has started (exploit bootstrap or `ksud late-load`), so
+     * current->pid != 1 and the manager's KSU_GET_INFO_FLAG_LATE_LOAD bit
+     * truthfully says "late load".  The flag is never forced: reporting a
+     * fabricated "built-in" state would be exactly the kind of driver-level
+     * lie this project forbids, and it would also disable the late-load
+     * init sequence below (allowlist load, manager observer, throne scan,
+     * boot_completed), which is the sequence that actually makes a
+     * post-boot module functional.  module_load_filter is wired on both
+     * paths so behaviour matches upstream regardless of load timing;
+     * ksu_ksud_init stays built-in-only because its hooks are dead weight
+     * under late-load semantics (see the note at that call site). */
 #ifdef MODULE
     ksu_late_loaded = (current->pid != 1);
 #else
@@ -222,10 +320,6 @@ int __init kernelsu_init(void)
         pr_alert("shell is allowed at init!");
     }
 
-#ifdef CONFIG_ARM64
-    ksu_start_apatch_conflict_check();
-#endif
-
     ksu_cred = prepare_creds();
     if (!ksu_cred) {
         pr_err("prepare cred failed!\n");
@@ -233,17 +327,37 @@ int __init kernelsu_init(void)
     }
 
     ksu_init_symbol_resolver();
+    if (ksu_resolve_unexported()) {
+        pr_err("failed to resolve unexported kernel symbols\n");
+        return -ENOENT;
+    }
+    ksu_dbg_stage = 3;
+#ifdef CONFIG_ARM64
+    /* must run after ksu_resolve_unexported(): its kthread may call the
+     * do_syslog shim, whose slot would still be NULL otherwise. */
+    ksu_start_apatch_conflict_check();
+#endif
     ksu_selinux_init();
     ksu_feature_init();
     ksu_sulog_init();
     ksu_adb_root_init();
     ksu_selinux_hide_init();
 
-    ksu_supercalls_init();
+    /* ksu_supercalls_init() patches sys_call_table[__NR_reboot], so it runs
+     * from ksu_hook_init() after the table has been resolved. */
+    ksu_dbg_stage = 4;
     ksu_app_profile_init();
 
     ksu_setuid_hook_init();
     ksu_sucompat_init();
+
+    /* Each init path below owns its own sepolicy injection: the late-load
+     * branch calls apply_kernelsu_rules()/cache_sid() as upstream does, and
+     * the built-in branch gets the same two calls so a non-late-loaded
+     * module still ends up with the full ruleset.  ksud's later
+     * `sepolicy apply` (handle_policy) uses its own local policydb copy and
+     * stays compatible with either. */
+
     if (ksu_late_loaded) {
         // This way are only happen when tracepoint+lkm
         // so we use ifdef MODULE there to avoid manual hook compile failed
@@ -271,13 +385,35 @@ int __init kernelsu_init(void)
         ksu_boot_completed = true;
         track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS);
 
-        if (!getenforce()) {
+        /* module_load_filter is wired on both paths: with no block_modules
+         * parameter it only prints one line, and with names it installs the
+         * init_module/finit_module hooks that upstream expects regardless of
+         * how the driver got loaded.  ksu_ksud_init() is deliberately NOT
+         * wired here: in late-load mode ksu_is_safe_mode() returns early, so
+         * its volume-down probe can never arm safe mode, and its other half
+         * (init.rc read/fstat augmentation) only serves boot-time module
+         * autoload, which this device does not use (every boot re-runs the
+         * chain).  Wiring it would add a global read+fstat hook for every
+         * process on the system for zero benefit. */
+        ksu_module_load_filter_hook_init();
+
+        /* Upstream unconditionally flips SELinux to enforcing here.  Our
+         * recovery sequence needs the module loaded while SELinux is still
+         * permissive (the overlay/daemon/su installation runs after this and
+         * must not be blocked), and the restore script flips enforcing at the
+         * very end, so the flip is parameterised instead of hard-coded.
+         * enforce_on_load=1 restores upstream behaviour. */
+        if (!getenforce() && ksu_enforce_on_load) {
             pr_info("Permissive SELinux, enforcing\n");
             setenforce(true);
         }
 #endif
     } else {
         ksu_hook_init();
+        ksu_dbg_stage = 6;
+
+        apply_kernelsu_rules();
+        cache_sid();
 
         ksu_module_load_filter_hook_init();
 
@@ -295,6 +431,8 @@ int __init kernelsu_init(void)
     kobject_del(&THIS_MODULE->mkobj.kobj);
 #endif
 #endif
+    ksu_dbg_stage = 100;
+    pr_emerg("KSUDBG init done\n");
     return 0;
 }
 

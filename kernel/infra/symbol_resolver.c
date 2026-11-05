@@ -1,4 +1,5 @@
 #include <linux/kallsyms.h>
+#include <linux/kprobes.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/version.h>
@@ -56,25 +57,37 @@ struct ksu_lookup_symbol_ctx {
     void *match;
 };
 
+// KP-5.4 fork (OPPO qgki): kallsyms_lookup_name and kallsyms_lookup are
+// NOT exported on this kernel (kernel/kallsyms.c only exports
+// sprint_symbol*).  Resolve kallsyms_lookup_name once through the standard
+// kprobe trick, then route every lookup through the cached pointer.  The
+// old module-symbol filter (kallsyms_lookup module_name check) is dropped:
+// kallsyms_lookup_name only walks the kernel image on 5.4 anyway, and none
+// of our queried names collide with loaded modules.
+static unsigned long (*kallsyms_lookup_name_fn)(const char *name);
+
 unsigned long __nocfi find_kernel_symbol_exact(const char *symbol_name)
 {
-    unsigned long addr = 0;
-#if HAVE_ON_EACH_MATCH_SYMBOL
-    if (likely(kallsyms_on_each_match_symbol_fn)) {
-        kallsyms_on_each_match_symbol_fn(find_kernel_symbol_exact_cb, symbol_name, &addr);
-        return addr;
-    }
-#endif
-    char *module_name = NULL;
-    char buf[KSYM_SYMBOL_LEN];
-
-    addr = kallsyms_lookup_name(symbol_name);
-    // check if it is kernel symbol
-    kallsyms_lookup(addr, NULL, NULL, &module_name, buf);
-    if (unlikely(module_name)) {
-        pr_warn("ignore symbol %s of module %s\n", symbol_name, module_name);
+    if (unlikely(!kallsyms_lookup_name_fn))
         return 0;
+    return kallsyms_lookup_name_fn(symbol_name);
+}
+
+static unsigned long ksu_resolve_kallsyms_lookup_name(void)
+{
+    struct kprobe kp = {
+        .symbol_name = "kallsyms_lookup_name",
+    };
+    unsigned long addr = 0;
+
+    if (register_kprobe(&kp) == 0) {
+        addr = (unsigned long)kp.addr;
+        unregister_kprobe(&kp);
     }
+    if (!addr)
+        pr_err("failed to resolve kallsyms_lookup_name via kprobe\n");
+    else
+        pr_info("kallsyms_lookup_name @ 0x%lx (via kprobe)\n", addr);
     return addr;
 }
 
@@ -176,6 +189,9 @@ void *ksu_resolve_symbol_for_functable_hook(const char *symbol_name)
 
 void __init ksu_init_symbol_resolver()
 {
+    kallsyms_lookup_name_fn = (void *)ksu_resolve_kallsyms_lookup_name();
+    if (!kallsyms_lookup_name_fn)
+        return;
 #if !ALWAYS_HAVE_ON_EACH_SYMBOL
     kallsyms_on_each_symbol_fn = (void *)find_kernel_symbol_exact("kallsyms_on_each_symbol");
     if (!kallsyms_on_each_symbol_fn) {

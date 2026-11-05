@@ -18,12 +18,14 @@ kernelsu-objs += manager/manager.o
 endif
 
 kernelsu-objs += compat/kernel_compat.o
+kernelsu-objs += compat/unexported_shim.o
 kernelsu-objs += infra/su_mount_ns.o
 kernelsu-objs += infra/seccomp_cache.o
 kernelsu-objs += infra/file_wrapper.o
 kernelsu-objs += infra/event_queue.o
 kernelsu-objs += runtime/boot_event.o
 kernelsu-objs += runtime/ksud_integration.o
+kernelsu-objs += runtime/hotload.o
 
 kernelsu-objs += selinux/selinux.o
 kernelsu-objs += selinux/sepolicy.o
@@ -36,6 +38,94 @@ kernelsu-objs += supercall/dispatch.o
 kernelsu-objs += supercall/perm.o
 kernelsu-objs += supercall/supercall.o
 
+# ---------------------------------------------------------------------------
+# SuSFS, LKM edition.
+#
+# The stock SuSFS integration path (CONFIG_KSU_SUSFS=y on the make command
+# line) is for kernels that already carry the SuSFS patch: Kbuild then
+# includes tools/susfs_compat.mk and requires $(srctree)/fs/susfs.c.  We have
+# a stock, locked boot image, so that path is not usable and we never pass
+# CONFIG_KSU_SUSFS to make.
+#
+# Instead the -D flags below are applied *per object*: only the files that
+# talk to the SuSFS ABI see the macro.  Defining CONFIG_KSU_SUSFS globally
+# would change ksu_handle_faccessat()/ksu_handle_stat() prototypes in
+# feature/sucompat.h and break the build.
+# ---------------------------------------------------------------------------
+ccflags-y += -I$(src)/susfs/include
+kernelsu-objs += susfs/susfs.o
+kernelsu-objs += susfs/susfs_probe.o
+kernelsu-objs += susfs/susfs_kstat.o
+kernelsu-objs += susfs/susfs_path.o
+kernelsu-objs += susfs/susfs_uname.o
+kernelsu-objs += susfs/susfs_cmdline.o
+kernelsu-objs += susfs/susfs_kallsyms.o
+kernelsu-objs += susfs/susfs_open_redirect.o
+kernelsu-objs += susfs/susfs_map.o
+kernelsu-objs += susfs/susfs_mount.o
+
+CFLAGS_susfs/susfs.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                        -DCONFIG_KSU_SUSFS_SUS_KSTAT \
+                        -DCONFIG_KSU_SUSFS_SUS_PATH \
+                        -DCONFIG_KSU_SUSFS_SPOOF_UNAME \
+                        -DCONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+                        -DCONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+                        -DCONFIG_KSU_SUSFS_OPEN_REDIRECT \
+                        -DCONFIG_KSU_SUSFS_SUS_MAP \
+                        -DCONFIG_KSU_SUSFS_SUS_MOUNT
+CFLAGS_susfs/susfs_probe.o += -DCONFIG_KSU_SUSFS
+CFLAGS_susfs/susfs_kstat.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                              -DCONFIG_KSU_SUSFS_SUS_KSTAT
+CFLAGS_susfs/susfs_path.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                             -DCONFIG_KSU_SUSFS_SUS_PATH
+CFLAGS_susfs/susfs_uname.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                              -DCONFIG_KSU_SUSFS_SPOOF_UNAME
+CFLAGS_susfs/susfs_cmdline.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                                -DCONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+CFLAGS_susfs/susfs_kallsyms.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                                 -DCONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+CFLAGS_susfs/susfs_open_redirect.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                                      -DCONFIG_KSU_SUSFS_OPEN_REDIRECT
+CFLAGS_susfs/susfs_map.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                            -DCONFIG_KSU_SUSFS_SUS_MAP
+# susfs_mount.o includes <fs/mount.h> (the kernel's private struct mount with
+# real_mount()), which is not part of the out-of-tree build tree's include
+# path, so it gets the source tree on its own include path.
+CFLAGS_susfs/susfs_mount.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                              -DCONFIG_KSU_SUSFS_SUS_MOUNT \
+                              -I$(srctree)
+CFLAGS_supercall/dispatch.o += -DCONFIG_KSU_SUSFS -DCONFIG_KSU_SUSFS_ENABLE_LOG \
+                               -DCONFIG_KSU_SUSFS_SUS_KSTAT \
+                               -DCONFIG_KSU_SUSFS_SUS_PATH \
+                               -DCONFIG_KSU_SUSFS_SPOOF_UNAME \
+                               -DCONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+                               -DCONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+                               -DCONFIG_KSU_SUSFS_OPEN_REDIRECT \
+                               -DCONFIG_KSU_SUSFS_SUS_MAP \
+                               -DCONFIG_KSU_SUSFS_SUS_MOUNT
+CFLAGS_supercall/supercall.o += -DCONFIG_KSU_SUSFS
+# feature/kernel_umount.o schedules susfs_extra_works() and marks the task
+# with TIF_PROC_UMOUNTED; both live behind CONFIG_KSU_SUSFS upstream.  Only
+# this object sees the macro - defining it globally would change the
+# ksu_handle_faccessat()/ksu_handle_stat() prototypes (see above).
+CFLAGS_feature/kernel_umount.o += -DCONFIG_KSU_SUSFS
+# hook/setuid_hook.o: handle_zygote_next_setresuid() is the *only* place a
+# usap/app-zygote born process gets TIF_PROC_UMOUNTED.  ksu_handle_setuid()
+# returns early for anything whose cred is not the zygote domain, so the
+# ksu_handle_umount() path in feature/kernel_umount.o never runs for them and
+# without this macro every SuSFS "hide from app" test
+# (susfs_is_current_proc_umounted_app()) would stay false forever.
+CFLAGS_hook/setuid_hook.o += -DCONFIG_KSU_SUSFS
+# selinux/selinux.o: is_zygote_next() is a static inline `return false` unless
+# this object sees the macro, and hook/setuid_hook.o calls it - without the
+# macro here that reference stays undefined and the module fails to load with
+# -ENOENT.  Enabling it also caches the zygote_next/priv_app SIDs.
+CFLAGS_selinux/selinux.o += -DCONFIG_KSU_SUSFS
+# susfs_init() has to run at module load so that later phases can register
+# their kprobes there; the upstream call site lives in the inline-hook branch
+# of ksu_hook_init(), which our TRACEPOINT build never takes.
+CFLAGS_core/init.o += -DKSU_SUSFS_LKM
+
 ifdef CONFIG_ARM64
 kernelsu-objs += compat/apatch_conflict.o
 endif
@@ -46,6 +136,7 @@ ccflags-y += -Wno-declaration-after-statement -Wno-unused-function -Wno-unused-v
 ccflags-y += -Wno-int-to-pointer-cast -Wno-declaration-after-statement
 
 ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include
+ccflags-y += -I$(objtree)/security/selinux
 ccflags-y += -I$(srctree)/$(src) -I$(srctree)/$(src)/include
 ccflags-y += -I$(src) -I$(src)/include
 
@@ -173,10 +264,10 @@ ifdef CONFIG_KSU_TRACEPOINT_HOOK
     ifneq ($(KERNEL_TYPE), GKI 2.0)
       $(info -- $(REPO_NAME) TP Hooks are only supported on GKI 2.0 kernels.)
       $(info -- Current Kernel Type: $(KERNEL_TYPE))
-      $(info -- If you really want to continue, go to Kbuild and comment out this warning.)
-      $(info -- Usually, this error occurs because you forgot to enable some kernel configurations.)
-      $(info -- Read: https://bakasu.org/guide/manual-integrate.html)
-      $(error TP hooks are incompatible with Non-GKI/GKI 1.0 kernels.)
+      $(info -- KP-5.4 fork: gate intentionally disabled. sys_enter tracepoint is instantiated)
+      $(info -- unconditionally by arch/arm64/kernel/ptrace.c CREATE_TRACE_POINTS on this tree,)
+      $(info -- and register is done via kallsyms-resolved tp + exported probe_register_prio.)
+      #$(error TP hooks are incompatible with Non-GKI/GKI 1.0 kernels.)
     endif
   endif
 
@@ -246,3 +337,4 @@ $(info -- KernelSU Manager package name: $(KSU_MANAGER_PACKAGE))
 endif
 
 # Keep a new line here!! Because someone may append config
+

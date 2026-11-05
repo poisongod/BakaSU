@@ -365,6 +365,15 @@ out:
 void track_throne(unsigned int flags)
 {
     struct track_throne_struct *tts = kzalloc(sizeof(struct track_throne_struct), GFP_KERNEL);
+    if (!tts) {
+        // Called from kernelsu_init() on the late-load path, so a failed
+        // allocation here would be a NULL deref during insmod (oops ->
+        // panic).  Losing one throne scan is recoverable: the next
+        // packages.list event re-runs it, and ksu_debug_manager_appid is
+        // the belt-and-braces registration path.
+        pr_err("track_throne: alloc tts failed, skip this scan\n");
+        return;
+    }
     tts->flags = flags;
 
     if (flags & TRACK_THRONE_FORCE_SYNCHRONOUS) {

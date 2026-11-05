@@ -1,3 +1,4 @@
+#include "compat/unexported_data.h"
 #include <linux/gfp.h>
 #include <linux/fdtable.h>
 #include <linux/export.h>

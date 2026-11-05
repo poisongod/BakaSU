@@ -22,6 +22,14 @@ struct ksu_ioctl_cmd_map {
 int ksu_install_fd(void);
 // Install a KSU fd that authorizes operations required while starting su.
 int ksu_install_su_fd(void);
+// Non-CLOEXEC variant: survives exec of the installing task.
+int ksu_install_fd_no_cloexec(void);
+// True when current's fdtable already holds a driver fd (dedupe helper for
+// the manager hand-off paths).
+bool ksu_current_has_driver_fd(void);
+// execve hook helper: hand the driver fd to the exec'ing ksud image when
+// the calling uid is the registered manager (see supercall.c).
+void ksu_hand_fd_for_ksud_exec(const char __user *filename_user);
 bool ksu_is_su_session_fd(const struct file *filp);
 
 void ksu_supercalls_init(void);

@@ -1,3 +1,4 @@
+#include "compat/unexported_data.h"
 #include "hook/tp_marker.h"
 
 #include "linux/cred.h"

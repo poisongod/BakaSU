@@ -45,7 +45,8 @@ static void ksu_defer_track_throne(void)
         cb = kzalloc(sizeof(*cb), GFP_KERNEL);
         if (cb) {
             cb->func = ksu_track_throne_tw_func;
-            if (!task_work_add(current, cb, TWA_RESUME))
+            // KP-5.4 fork: task_work_add takes bool notify here (no TWA_RESUME enum)
+            if (!task_work_add(current, cb, true))
                 return;
             kfree(cb);
         }
@@ -54,6 +55,28 @@ static void ksu_defer_track_throne(void)
     track_throne(TRACK_THRONE_FORCE_SYNCHRONOUS);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+// KP-5.4 fork: mainline 5.4 fsnotify_ops has only handle_event (8-arg);
+// android common kernels gained handle_inode_event later.
+static int ksu_handle_event(struct fsnotify_group *group, struct inode *inode, u32 mask,
+                            const void *data, int data_type, const struct qstr *file_name,
+                            u32 cookie, struct fsnotify_iter_info *iter_info)
+{
+    if (!file_name)
+        return 0;
+    if (mask & FS_ISDIR)
+        return 0;
+    if (file_name->len == 13 && !memcmp(file_name->name, "packages.list", 13)) {
+        pr_info("packages.list detected: %d\n", mask);
+        ksu_defer_track_throne();
+    }
+    return 0;
+}
+
+static const struct fsnotify_ops ksu_ops = {
+    .handle_event = ksu_handle_event,
+};
+#else
 static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask, struct inode *inode, struct inode *dir,
                                   const struct qstr *file_name, u32 cookie)
 {
@@ -71,6 +94,7 @@ static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask, struct i
 static const struct fsnotify_ops ksu_ops = {
     .handle_inode_event = ksu_handle_inode_event,
 };
+#endif
 
 static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark **out)
 {

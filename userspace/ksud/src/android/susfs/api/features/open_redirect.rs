@@ -1,5 +1,3 @@
-use std::fs;
-
 use anyhow::{Result, anyhow};
 
 use crate::android::susfs::{
@@ -35,20 +33,25 @@ pub fn add_open_redirect(
     redirected_path: &str,
     uid_scheme: &UidScheme,
 ) -> Result<()> {
-    let abs_target = fs::canonicalize(target_path)?;
-    let abs_redirect = fs::canonicalize(redirected_path)?;
+    /*
+     * The spelling matters: a rule is keyed on the string the target process
+     * uses, so canonicalising here would silently move the rule to a different
+     * name (e.g. /system/etc/security/otacerts.zip is a symlink into
+     * /my_engineering/..., and a package opening the /system spelling would no
+     * longer match).  Both spellings of the same file are accepted by the
+     * kernel (it stores the canonical name as an alias), so only require an
+     * absolute path here and let the kernel resolve and validate it.
+     */
+    if !target_path.starts_with('/') {
+        return Err(anyhow!("target path must be absolute: {target_path}"));
+    }
+    if !redirected_path.starts_with('/') {
+        return Err(anyhow!("redirect path must be absolute: {redirected_path}"));
+    }
 
     let mut info = SusfsOpenRedirect::default();
-    str_to_c_array(
-        abs_target.to_str().ok_or(anyhow!("Invalid target path!"))?,
-        &mut info.target_pathname,
-    );
-    str_to_c_array(
-        abs_redirect
-            .to_str()
-            .ok_or(anyhow!("Invalid redirect path!"))?,
-        &mut info.redirected_pathname,
-    );
+    str_to_c_array(target_path, &mut info.target_pathname);
+    str_to_c_array(redirected_path, &mut info.redirected_pathname);
 
     info.uid_scheme = (*uid_scheme) as i32;
     info.err = ERR_CMD_NOT_SUPPORTED;

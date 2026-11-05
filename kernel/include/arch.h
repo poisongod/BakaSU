@@ -8,6 +8,7 @@
 #define __PT_PARM1_REG regs[0]
 #define __PT_PARM2_REG regs[1]
 #define __PT_PARM3_REG regs[2]
+#define __PT_PARM4_REG regs[3]
 #define __PT_SYSCALL_PARM4_REG regs[3]
 #define __PT_CCALL_PARM4_REG regs[3]
 #define __PT_PARM5_REG regs[4]
@@ -108,6 +109,11 @@
 #define PT_REGS_SYSCALL_PARM1(x) (__PT_REGS_CAST(x)->__PT_SYSCALL_PARM1_REG)
 #define PT_REGS_PARM2(x) (__PT_REGS_CAST(x)->__PT_PARM2_REG)
 #define PT_REGS_PARM3(x) (__PT_REGS_CAST(x)->__PT_PARM3_REG)
+/* PT_REGS_PARM4 was missing from this upstream shim (only SYSCALL/CCALL
+ * variants existed); ksu_hook_prctl's copy_to_user(arg2=flags) used the bare
+ * PT_REGS_PARM4 -> implicit declaration -> U PT_REGS_PARM4 in the .ko ->
+ * finit_module -ENOENT (Unknown symbol) on every load. */
+#define PT_REGS_PARM4(x) (__PT_REGS_CAST(x)->__PT_PARM4_REG)
 #define PT_REGS_SYSCALL_PARM4(x) (__PT_REGS_CAST(x)->__PT_SYSCALL_PARM4_REG)
 #define PT_REGS_CCALL_PARM4(x) (__PT_REGS_CAST(x)->__PT_CCALL_PARM4_REG)
 #define PT_REGS_PARM5(x) (__PT_REGS_CAST(x)->__PT_PARM5_REG)

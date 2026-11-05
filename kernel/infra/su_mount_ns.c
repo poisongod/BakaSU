@@ -1,3 +1,4 @@
+#include "compat/unexported_data.h"
 #include <linux/dcache.h>
 #include <linux/errno.h>
 #include <linux/fdtable.h>
